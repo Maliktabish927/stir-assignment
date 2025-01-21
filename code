@@ -1,0 +1,128 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
+from pymongo import MongoClient
+import time
+import uuid
+import datetime
+import requests
+from flask import Flask, render_template_string, request
+
+# Setup Selenium with ProxyMesh proxy and Chrome driver
+def setup_driver(proxy_url):
+    chrome_options = Options()
+    chrome_options.add_argument(f"--proxy-server={proxy_url}")
+    service = Service("/path/to/chromedriver")  # Update with your ChromeDriver path
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    return driver
+
+# Scrape Twitter trends
+def fetch_trending_topics(driver, username, password):
+    driver.get("https://twitter.com/login")
+    time.sleep(2)
+
+    # Login to Twitter
+    username_field = driver.find_element(By.NAME, "text")
+    username_field.send_keys(username)
+    username_field.send_keys(Keys.RETURN)
+    time.sleep(2)
+
+    password_field = driver.find_element(By.NAME, "password")
+    password_field.send_keys(password)
+    password_field.send_keys(Keys.RETURN)
+    time.sleep(5)
+
+    # Fetch trends
+    trends = []
+    try:
+        trending_section = driver.find_element(By.XPATH, "//section[contains(@aria-labelledby, 'accessible-list')]")
+        trending_items = trending_section.find_elements(By.XPATH, ".//span[contains(@class, 'css-901oao')]" or ".//div[contains(@class, 'trend-item')]")
+        for trend in trending_items[:5]:
+            trends.append(trend.text)
+    except Exception as e:
+        print("Error fetching trends:", e)
+    finally:
+        driver.quit()
+
+    return trends
+
+# Save trends to MongoDB
+def save_to_mongodb(trends, ip_address):
+    client = MongoClient("mongodb://localhost:27017/")
+    db = client["twitter_trends"]
+    collection = db["trends"]
+
+    data = {
+        "_id": str(uuid.uuid4()),
+        "trends": trends,
+        "timestamp": datetime.datetime.now(),
+        "ip_address": ip_address
+    }
+
+    collection.insert_one(data)
+    return data
+
+# Flask App for HTML page
+app = Flask(__name__)
+
+@app.route("/", methods=["GET", "POST"])
+def home():
+    if request.method == "POST":
+        proxy_url = "http://USERNAME:PASSWORD@proxymesh.com:31280"  # Replace with your ProxyMesh credentials
+        username = "your_twitter_username"  # Update with your Twitter username
+        password = "your_twitter_password"  # Update with your Twitter password
+
+        driver = setup_driver(proxy_url)
+
+        # Get IP address
+        response = requests.get("http://ipinfo.io/json", proxies={"http": proxy_url, "https": proxy_url})
+        ip_address = response.json().get("ip")
+
+        # Fetch trending topics and save to MongoDB
+        trends = fetch_trending_topics(driver, username, password)
+        record = save_to_mongodb(trends, ip_address)
+
+        # Return HTML response
+        return render_template_string(
+            """
+            <!DOCTYPE html>
+            <html>
+            <head><title>Twitter Trends</title></head>
+            <body>
+                <h1>Twitter Trends</h1>
+                <p>These are the most happening topics as on {{ record.timestamp }}:</p>
+                <ul>
+                    {% for trend in record.trends %}
+                        <li>{{ trend }}</li>
+                    {% endfor %}
+                </ul>
+                <p>The IP address used for this query was {{ record.ip_address }}.</p>
+                <h2>JSON extract:</h2>
+                <pre>{{ record | tojson }}</pre>
+                <form method="POST">
+                    <button type="submit">Run the query again</button>
+                </form>
+            </body>
+            </html>
+            """,
+            record=record
+        )
+
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head><title>Twitter Trends</title></head>
+    <body>
+        <h1>Twitter Trends</h1>
+        <form method="POST">
+            <button type="submit">Click here to run the script</button>
+        </form>
+    </body>
+    </html>
+    """
+
+if __name__ == "__main__":
+    app.run(debug=True)
